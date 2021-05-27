@@ -1,0 +1,228 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings FATAL => 'all';
+use Data::Dumper;
+
+use Math::Random::Discrete;
+use Term::ANSIColor;
+use UI::Dialog;
+use Capture::Tiny ':all';
+use Data::Dumper;
+use Term::ReadKey;
+
+sub pause() {
+	print "Press any key to continue or CTRL-c to quit...";
+
+	ReadMode 'cbreak';
+	ReadKey(0);
+	ReadMode 'normal';
+}
+
+sub error ($;$);
+sub debug ($$);
+
+my %options = (
+	debug => 0,
+	play => 1,
+	debuglevel => 1
+);
+
+my $d = new UI::Dialog ( backtitle => 'SerienWatcher', title => 'SerienWatcher',
+	height => 35, width => 65 , listheight => 25,
+	order => [ 'whiptail', 'gdialog', 'zenity', 'whiptail' ] );
+
+sub error ($;$) {
+	my $message = shift;
+	my $no_exit = shift // 1;
+	debug 0, "error($message, $no_exit)";
+	warn color("red").$message.color("reset")."\n";
+	if($no_exit != 1) {
+		exit 1;
+	}
+}
+
+sub debug ($$) {
+	my $debuglevel = shift;
+	my $text = shift;
+	if($options{debug} && $options{debuglevel} >= $debuglevel) {
+		warn "DEBUG ($debuglevel): ".color("blue on_white").$text.color("reset")."\n";
+	}
+}
+
+sub input {
+	my ($text, $entry) = @_;
+	debug 0, "input($text, $entry)";
+	my $result = $d->inputbox( text => $text, entry => $entry);
+	if($d->rv()) {
+		debug 1, "You chose cancel. Exiting.";
+		exit();
+	}
+	return $result;
+}
+
+sub menu {
+	my $text = shift;
+	my $list = shift;
+	debug 0, "menu($text, \$list)";
+	my $chosen = $d->menu(text => $text, list => $list);
+	if($d->rv()) {
+		exit;
+	}
+
+	return $chosen;
+}
+
+sub radiolist {
+	my $text = shift;
+	my $list = shift;
+	debug 0, "radiolist($text, \$list)";
+	my $chosen = $d->radiolist(text => $text, list => $list);
+	if($d->rv()) {
+		exit;
+	}
+
+	return $chosen;
+}
+
+sub msg {
+	my $text = shift;
+	debug 0, "msg($text)";
+	$d->msgbox(text => $text);
+}
+
+sub _help {
+	my $exit = shift // 0;
+	my $message = shift // undef;
+	error $message if(defined($message));
+
+	my ($green, $reset) = (color("green"), color("reset"));
+
+	print <<EOF;
+--debug                                                       Enable debug
+--debuglevel=4                                                Level of debug messages
+EOF
+	exit $exit;
+}
+
+sub analyze_args {
+	foreach (@_) {
+		if(m#^--debug$#) {
+			$options{debug} = 1;
+		} elsif(m#^--debuglevel=(.*)$#) {
+			$options{debuglevel} = $1;
+		} elsif (m#^--help$#) {
+			_help(0);
+		} else {
+			_help(1, "Unknown parameter: $_");				
+		}
+	}
+}
+
+sub program_installed {
+	my $program = shift;
+	debug 0, "program_installed($program)";
+
+	my $exists = 0;
+	my $ret = system(qq#which $program > /dev/null 2> /dev/null#);
+
+	if($ret == 0) {
+		debug 4, "$program already installed";
+		$exists = 1;
+	} else {
+		warn "$program does not seem to be installed. Please install it!";
+	}
+
+	return $exists;
+}
+
+
+sub check_installed_programs {
+	debug 0, "check_installed_programs()";
+
+	foreach (qw/vlc mediainfo whiptail/) {
+		if(!program_installed($_)) {
+			exit(1);
+		}
+	}
+}
+
+sub find_network_adapters {
+	debug 0, "find_network_adapters()";
+	my @adapters = ();
+	my $sysnetdir = "/sys/class/net/";
+	while (my $adapter = <$sysnetdir/*>) {
+		$adapter =~ s#^$sysnetdir/*##;
+		push @adapters, $adapter;
+	}
+	return @adapters;
+}
+
+sub ifdownifup {
+	my %par = (
+		interface => undef,
+		@_
+	);
+
+	debug 0, "arp_scan(".(Dumper %par).")";
+
+	die "No interface specified" unless defined $par{interface};
+
+	my $command = "sudo ifdown $par{interface}; sudo ifup $par{interface}";
+	debug 1, $command;
+
+	system($command);
+}
+
+sub arp_scan {
+	my %par = (
+		interface => undef,
+		localnet => 1,
+		@_
+	);
+
+	debug 0, "arp_scan(".(Dumper %par).")";
+
+	die "No interface specified" unless defined $par{interface};
+
+	my $command = "sudo arp-scan --interface=$par{interface} ";
+	if($par{localnet}) {
+		$command .= " --localnet ";
+	}
+
+	debug 1, $command;
+
+	system($command);
+}
+
+sub main () {
+	system("clear");
+	debug 0, "main()";
+
+	my @network_adapters = find_network_adapters();
+
+	my $first = 0;
+	my $chosen_adapter = menu("Choose network adapter: ", [map {$_ => $_ } @network_adapters]);
+
+	my $whattodo = menu("What to do with $chosen_adapter?", 
+		[
+			"a)" => "arp-scan $chosen_adapter",
+			"i)" => "ifdown $chosen_adapter && ifup $chosen_adapter"
+		]
+	);
+
+	if($chosen_adapter) {
+		if($whattodo eq "a)") {
+			arp_scan(interface => $chosen_adapter);
+		} elsif($whattodo eq "i)") {
+			ifdownifup(interface => $chosen_adapter);
+		}
+	}
+
+	pause();
+
+}
+
+analyze_args(@ARGV);
+
+main while 1;
